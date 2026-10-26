@@ -1,0 +1,671 @@
+AGENTIC AI TOOLS AND FRAMEWORKS — QUESTIONS 1–20
+SOURCE CODE, INPUT FORMAT, OUTPUT FORMAT
+
+For programs that call an OpenAI model, set OPENAI_API_KEY in the environment. Optional: set OPENAI_MODEL.
+Required packages depend on the question: langchain, langchain-openai, langchain-community, langchain-chroma, langgraph, faiss-cpu, chromadb.
+Persistent vector-store data is saved locally. Output examples below describe expected formats, not verified execution output.
+
+Question 1: Create a simple Python agent using LangChain that uses the ReAct method to calculate the total cost of items purchased by a user. Use FAISS memory to store previous purchases and retrieve them for a future query.
+
+SOURCE CODE:
+Filename: question_01.py
+import os, ast, operator
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_core.documents import Document
+from langchain_core.tools import tool
+from langchain.agents import create_agent
+
+DB = "q01_faiss"
+emb = OpenAIEmbeddings()
+try: memory = FAISS.load_local(DB, emb, allow_dangerous_deserialization=True)
+except Exception: memory = None
+
+@tool
+def calculate_total(items: str) -> str:
+    """Calculate purchase total. Input is a Python-style list of (item, quantity, unit_price)."""
+    rows = ast.literal_eval(items)
+    total = sum(float(q) * float(p) for _, q, p in rows)
+    return f"Purchase: {rows}; total={total:.2f}"
+
+model = ChatOpenAI(model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"), temperature=0)
+agent = create_agent(model, tools=[calculate_total], system_prompt="Use the calculate_total tool for arithmetic. Answer briefly.")
+query = input("Enter items as [('pen',2,10),('book',1,50)] or ask about previous purchases: ")
+if "previous" in query.lower() and memory:
+    print("\n".join(d.page_content for d in memory.similarity_search(query, k=3)))
+else:
+    result = agent.invoke({"messages":[{"role":"user","content":query}]})
+    answer = result["messages"][-1].content
+    print(answer)
+    if memory is None: memory = FAISS.from_documents([Document(page_content=f"User query: {query}\nResult: {answer}")], emb)
+    else: memory.add_documents([Document(page_content=f"User query: {query}\nResult: {answer}")])
+    memory.save_local(DB)
+
+INPUT FORMAT:
+Enter items as a Python-style list of (item, quantity, unit_price), or ask about previous purchases. Example: [('pen',2,10),('book',1,50)].
+
+OUTPUT FORMAT:
+A purchase summary and total, or matching saved purchase records for a previous-purchase query. Example: 'total=70.00'.
+
+***
+Question 2: Develop a Python agent using LangChain that uses a step-by-step reasoning approach to create a daily study schedule. Use ChromaDB to remember the student's preferred study subjects and timings.
+
+SOURCE CODE:
+Filename: question_02.py
+import os
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_chroma import Chroma
+from langchain_core.documents import Document
+
+DB = "./q02_chroma"
+emb = OpenAIEmbeddings()
+memory = Chroma(collection_name="study_schedule", embedding_function=emb, persist_directory=DB)
+model = ChatOpenAI(model=os.getenv("OPENAI_MODEL","gpt-4o-mini"), temperature=0)
+request = input("Subjects, available hours, breaks, and preferred timings: ")
+past = memory.similarity_search(request, k=3)
+prompt = f"Create a practical daily study schedule. Work through: identify constraints, allocate subjects, add breaks, check feasibility. Give the schedule and a short rationale.\nPrevious preferences:\n{[d.page_content for d in past]}\nRequest: {request}"
+answer = model.invoke(prompt).content
+print(answer)
+memory.add_documents([Document(page_content=f"Preference/request: {request}\nSchedule: {answer}")])
+
+INPUT FORMAT:
+Enter subjects, available hours, breaks, and preferred timings. Example: 'Maths and AI; 5 PM–9 PM; 10-minute breaks; Maths first'.
+
+OUTPUT FORMAT:
+A daily schedule organized by time, subject, breaks, and concise rationale.
+
+***
+Question 3: Build a simple agent using LangGraph that uses the Tree-of-Thought method to generate three possible solutions for selecting a suitable study timetable. Use FAISS to store the user's previous timetable preferences.
+
+SOURCE CODE:
+Filename: question_03.py
+import os
+from typing import TypedDict
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_core.documents import Document
+from langgraph.graph import StateGraph, START, END
+
+DB="q03_faiss"
+emb=OpenAIEmbeddings()
+try: memory=FAISS.load_local(DB,emb,allow_dangerous_deserialization=True)
+except Exception: memory=None
+llm=ChatOpenAI(model=os.getenv("OPENAI_MODEL","gpt-4o-mini"),temperature=0)
+class State(TypedDict):
+    request:str
+    past:str
+    result:str
+def branch(s):
+    past=memory.similarity_search(s["request"],k=3) if memory else []
+    prompt=f"Tree-of-Thought: independently propose exactly three distinct study timetables, compare each against the constraints, and recommend one. Do not reveal private chain-of-thought; provide concise criteria and conclusions.\nPast preferences: {[d.page_content for d in past]}\nRequest: {s['request']}"
+    return {"past":str([d.page_content for d in past]),"result":llm.invoke(prompt).content}
+g=StateGraph(State); g.add_node("explore",branch); g.add_edge(START,"explore"); g.add_edge("explore",END)
+request=input("Study subjects, available times, and constraints: ")
+result=g.compile().invoke({"request":request,"past":"","result":""})["result"]
+print(result)
+if memory is None: memory=FAISS.from_documents([Document(page_content=f"{request}\n{result}")],emb)
+else: memory.add_documents([Document(page_content=f"{request}\n{result}")])
+memory.save_local(DB)
+
+INPUT FORMAT:
+Enter subjects, available times, and timetable constraints. Example: 'Maths, AI, DBMS; weekdays 5–8 PM; no study after 7 PM Friday'.
+
+OUTPUT FORMAT:
+Three timetable options, concise comparison, and a recommended feasible option.
+
+***
+Question 4: Develop a simple LangGraph multi-agent system containing Planner, Researcher, and Checker agents to prepare a short study plan. Use FAISS memory to store previously selected subjects.
+
+SOURCE CODE:
+Filename: question_04.py
+import os
+from typing import TypedDict
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_core.documents import Document
+from langgraph.graph import StateGraph, START, END
+
+DB="q04_faiss"; emb=OpenAIEmbeddings()
+try: memory=FAISS.load_local(DB,emb,allow_dangerous_deserialization=True)
+except Exception: memory=None
+llm=ChatOpenAI(model=os.getenv("OPENAI_MODEL","gpt-4o-mini"),temperature=0)
+class S(TypedDict):
+    request:str; plan:str; research:str; final:str
+def planner(s): return {"plan":llm.invoke("Planner: divide this into a short realistic study plan. Request: "+s["request"]).content}
+def researcher(s): return {"research":llm.invoke("Researcher: suggest useful study techniques and time allocation for this plan. Plan: "+s["plan"]).content}
+def checker(s): return {"final":llm.invoke("Checker: correct conflicts, keep concise, and produce final study plan. Plan: "+s["plan"]+"\nAdvice: "+s["research"]).content}
+g=StateGraph(S); g.add_node("planner",planner); g.add_node("researcher",researcher); g.add_node("checker",checker)
+g.add_edge(START,"planner"); g.add_edge("planner","researcher"); g.add_edge("researcher","checker"); g.add_edge("checker",END)
+req=input("Subjects, exam date, and available study time: ")
+past=memory.similarity_search(req,k=3) if memory else []
+req += "\nPreviously selected subjects: "+str([d.page_content for d in past])
+out=g.compile().invoke({"request":req,"plan":"","research":"","final":""})["final"]
+print(out)
+doc=Document(page_content=f"{req}\n{out}")
+if memory is None: memory=FAISS.from_documents([doc],emb)
+else: memory.add_documents([doc])
+memory.save_local(DB)
+
+INPUT FORMAT:
+Enter subjects, exam date, and available study time. Example: 'AI, DBMS, Java; exam in 10 days; 2 hours daily'.
+
+OUTPUT FORMAT:
+A short study plan prepared by Planner, Researcher, and Checker stages.
+
+***
+Question 5: Build a Python agent using LangChain that uses Chain-of-Thought reasoning to divide a large assignment into smaller tasks. Use ChromaDB to remember the student's previous assignment preferences.
+
+SOURCE CODE:
+Filename: question_05.py
+import os
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_chroma import Chroma
+from langchain_core.documents import Document
+
+emb=OpenAIEmbeddings(); memory=Chroma(collection_name="assignments",embedding_function=emb,persist_directory="./q05_chroma")
+llm=ChatOpenAI(model=os.getenv("OPENAI_MODEL","gpt-4o-mini"),temperature=0)
+req=input("Assignment topic, deadline, requirements, and preferred task style: ")
+past=memory.similarity_search(req,k=3)
+prompt=f"Break the assignment into ordered, actionable subtasks with estimated durations, dependencies, and milestones. Provide concise rationale, not hidden chain-of-thought. Previous preferences: {[d.page_content for d in past]}. Assignment: {req}"
+out=llm.invoke(prompt).content
+print(out)
+memory.add_documents([Document(page_content=f"Request: {req}\nPlan: {out}")])
+
+INPUT FORMAT:
+Enter assignment topic, deadline, requirements, and preferred task style. Example: 'AI report, due in 7 days, 2000 words, daily milestones'.
+
+OUTPUT FORMAT:
+An ordered task breakdown with durations, dependencies, and milestones.
+
+***
+Question 6: Create a simple agent using LangGraph that uses the ReAct method to recommend a suitable programming language based on the user's requirements. Store previous programming preferences using FAISS.
+
+SOURCE CODE:
+Filename: question_06.py
+import os
+from typing import TypedDict
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_core.documents import Document
+from langgraph.graph import StateGraph, START, END
+
+DB="q06_faiss"; emb=OpenAIEmbeddings()
+try: memory=FAISS.load_local(DB,emb,allow_dangerous_deserialization=True)
+except Exception: memory=None
+llm=ChatOpenAI(model=os.getenv("OPENAI_MODEL","gpt-4o-mini"),temperature=0)
+class S(TypedDict): request:str; answer:str
+def recommend(s):
+    past=memory.similarity_search(s["request"],k=3) if memory else []
+    prompt=f"Use a ReAct-style cycle: identify requirements, compare candidate languages using relevant criteria, then recommend one with reasons. Do not reveal hidden chain-of-thought. Previous preferences: {[d.page_content for d in past]}. Requirements: {s['request']}"
+    return {"answer":llm.invoke(prompt).content}
+g=StateGraph(S); g.add_node("agent",recommend); g.add_edge(START,"agent"); g.add_edge("agent",END)
+req=input("Describe your project, experience, platform, and constraints: ")
+out=g.compile().invoke({"request":req,"answer":""})["answer"]; print(out)
+doc=Document(page_content=f"Preference: {req}\nRecommendation: {out}")
+if memory is None: memory=FAISS.from_documents([doc],emb)
+else: memory.add_documents([doc])
+memory.save_local(DB)
+
+INPUT FORMAT:
+Describe project, experience, platform, and constraints. Example: 'Beginner; data-analysis desktop app; cross-platform'.
+
+OUTPUT FORMAT:
+A programming-language recommendation with reasons based on requirements and stored preferences.
+
+***
+Question 7: Develop a Python agent that uses the Tree-of-Thought method to generate and compare three possible solutions for a simple college timetable problem. Use ChromaDB to store previously selected timetable constraints.
+
+SOURCE CODE:
+Filename: question_07.py
+import os
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_chroma import Chroma
+from langchain_core.documents import Document
+
+emb=OpenAIEmbeddings(); memory=Chroma(collection_name="timetable_constraints",embedding_function=emb,persist_directory="./q07_chroma")
+llm=ChatOpenAI(model=os.getenv("OPENAI_MODEL","gpt-4o-mini"),temperature=0)
+req=input("Enter subjects, rooms, time slots, faculty limits, and constraints: ")
+past=memory.similarity_search(req,k=3)
+prompt=f"Tree-of-Thought: create exactly three distinct college timetable options, compare them against every stated constraint, and identify a feasible option. Provide concise comparison rather than hidden chain-of-thought. Past constraints: {[d.page_content for d in past]}. Problem: {req}"
+out=llm.invoke(prompt).content; print(out)
+memory.add_documents([Document(page_content=f"Constraints: {req}\nOptions: {out}")])
+
+INPUT FORMAT:
+Enter subjects, rooms, time slots, faculty limits, and constraints. Example: '4 subjects, 2 rooms, 5 slots, no faculty overlap'.
+
+OUTPUT FORMAT:
+Three timetable options compared against constraints and a recommendation.
+
+***
+Question 8: Create a simple multi-agent system using LangGraph with Planner, Researcher, and Checker agents to prepare a short presentation on Artificial Intelligence. Use FAISS memory to store previously used presentation topics.
+
+SOURCE CODE:
+Filename: question_08.py
+import os
+from typing import TypedDict
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_core.documents import Document
+from langgraph.graph import StateGraph, START, END
+
+DB="q08_faiss"; emb=OpenAIEmbeddings()
+try: memory=FAISS.load_local(DB,emb,allow_dangerous_deserialization=True)
+except Exception: memory=None
+llm=ChatOpenAI(model=os.getenv("OPENAI_MODEL","gpt-4o-mini"),temperature=0)
+class S(TypedDict): topic:str; outline:str; facts:str; final:str
+def planner(s): return {"outline":llm.invoke("Planner: create a concise 5-slide outline for a presentation on "+s["topic"]).content}
+def researcher(s): return {"facts":llm.invoke("Researcher: provide accurate, introductory points for this slide outline; flag uncertainty. "+s["outline"]).content}
+def checker(s): return {"final":llm.invoke("Checker: verify clarity, remove unsupported claims, and produce slide-by-slide title and bullets. Outline: "+s["outline"]+"\nResearch: "+s["facts"]).content}
+g=StateGraph(S); g.add_node("planner",planner); g.add_node("researcher",researcher); g.add_node("checker",checker)
+g.add_edge(START,"planner"); g.add_edge("planner","researcher"); g.add_edge("researcher","checker"); g.add_edge("checker",END)
+topic=input("Presentation topic (default Artificial Intelligence): ").strip() or "Artificial Intelligence"
+past=memory.similarity_search(topic,k=3) if memory else []
+topic += "\nAvoid duplicating previous topics: "+str([d.page_content for d in past])
+out=g.compile().invoke({"topic":topic,"outline":"","facts":"","final":""})["final"]; print(out)
+doc=Document(page_content=f"Topic: {topic}\nPresentation: {out}")
+if memory is None: memory=FAISS.from_documents([doc],emb)
+else: memory.add_documents([doc])
+memory.save_local(DB)
+
+INPUT FORMAT:
+Enter a presentation topic; press Enter to use Artificial Intelligence. Example: 'Artificial Intelligence in healthcare'.
+
+OUTPUT FORMAT:
+A concise slide-by-slide presentation outline and bullets.
+
+***
+Question 9: Develop a simple agent using LangGraph that uses step-by-step reasoning to plan the tasks required for organizing a college event. Use FAISS memory to store previous event requirements.
+
+SOURCE CODE:
+Filename: question_09.py
+import os
+from typing import TypedDict
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_core.documents import Document
+from langgraph.graph import StateGraph, START, END
+
+DB="q09_faiss"; emb=OpenAIEmbeddings()
+try: memory=FAISS.load_local(DB,emb,allow_dangerous_deserialization=True)
+except Exception: memory=None
+llm=ChatOpenAI(model=os.getenv("OPENAI_MODEL","gpt-4o-mini"),temperature=0)
+class S(TypedDict): request:str; result:str
+def plan(s):
+    past=memory.similarity_search(s["request"],k=3) if memory else []
+    prompt=f"Create an ordered event checklist covering approvals, venue, budget, speakers, publicity, registration, volunteers, equipment, schedule, safety, and post-event review as relevant. Include deadlines and dependencies. Give concise rationale, not hidden chain-of-thought. Previous requirements: {[d.page_content for d in past]}. Event: {s['request']}"
+    return {"result":llm.invoke(prompt).content}
+g=StateGraph(S); g.add_node("planner",plan); g.add_edge(START,"planner"); g.add_edge("planner",END)
+req=input("Event type, date, audience, budget, venue, and team: ")
+out=g.compile().invoke({"request":req,"result":""})["result"]; print(out)
+doc=Document(page_content=f"Event requirements: {req}\nPlan: {out}")
+if memory is None: memory=FAISS.from_documents([doc],emb)
+else: memory.add_documents([doc])
+memory.save_local(DB)
+
+INPUT FORMAT:
+Enter event type, date, audience, budget, venue, and team. Example: 'Department seminar; 15 Nov; 100 students; budget 10000; seminar hall'.
+
+OUTPUT FORMAT:
+An ordered event checklist with deadlines and dependencies.
+
+***
+Question 10: Create a Python agent using LangChain that uses the Tree-of-Thought method to compare three possible study plans and select one based on given constraints. Use ChromaDB to retrieve the student's previous study preferences.
+
+SOURCE CODE:
+Filename: question_10.py
+import os
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_chroma import Chroma
+from langchain_core.documents import Document
+
+emb=OpenAIEmbeddings(); memory=Chroma(collection_name="study_preferences",embedding_function=emb,persist_directory="./q10_chroma")
+llm=ChatOpenAI(model=os.getenv("OPENAI_MODEL","gpt-4o-mini"),temperature=0)
+req=input("Subjects, exam date, daily available hours, and constraints: ")
+past=memory.similarity_search(req,k=3)
+prompt=f"Generate exactly three distinct study plans. Compare feasibility, coverage, breaks, and revision time against constraints; select and explain the most suitable. Use concise rationale, not hidden chain-of-thought. Previous preferences: {[d.page_content for d in past]}. Request: {req}"
+out=llm.invoke(prompt).content; print(out)
+memory.add_documents([Document(page_content=f"Study preferences: {req}\nComparison: {out}")])
+
+INPUT FORMAT:
+Enter subjects, exam date, available hours, and constraints. Example: '3 subjects; exam in 2 weeks; 3 hours/day; weekends free'.
+
+OUTPUT FORMAT:
+Three study plans, a concise comparison, and one selected plan.
+
+***
+Question 11: Build a simple multi-agent system using LangGraph with Planner, Researcher, and Checker agents to prepare a simple healthy meal plan. Use FAISS to remember previously stored food preferences.
+
+SOURCE CODE:
+Filename: question_11.py
+import os
+from typing import TypedDict
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_core.documents import Document
+from langgraph.graph import StateGraph, START, END
+
+DB="q11_faiss"; emb=OpenAIEmbeddings()
+try: memory=FAISS.load_local(DB,emb,allow_dangerous_deserialization=True)
+except Exception: memory=None
+llm=ChatOpenAI(model=os.getenv("OPENAI_MODEL","gpt-4o-mini"),temperature=0)
+class S(TypedDict): request:str; plan:str; ideas:str; final:str
+def planner(s): return {"plan":llm.invoke("Planner: draft a balanced one-day meal plan with breakfast, lunch, dinner, and snacks. Request: "+s["request"]).content}
+def researcher(s): return {"ideas":llm.invoke("Researcher: suggest practical nutritious food choices and substitutions for this plan. Plan: "+s["plan"]).content}
+def checker(s): return {"final":llm.invoke("Checker: review variety, practicality, stated allergies/preferences, and balance; give final meal plan. Request: "+s["request"]+"\nDraft: "+s["plan"]+"\nSuggestions: "+s["ideas"]).content}
+g=StateGraph(S); g.add_node("planner",planner); g.add_node("researcher",researcher); g.add_node("checker",checker)
+g.add_edge(START,"planner"); g.add_edge("planner","researcher"); g.add_edge("researcher","checker"); g.add_edge("checker",END)
+req=input("Food preferences, allergies, budget, diet, and meal requirements: ")
+past=memory.similarity_search(req,k=3) if memory else []
+req += "\nStored preferences: "+str([d.page_content for d in past])
+out=g.compile().invoke({"request":req,"plan":"","ideas":"","final":""})["final"]; print(out)
+doc=Document(page_content=f"Food preferences: {req}\nMeal plan: {out}")
+if memory is None: memory=FAISS.from_documents([doc],emb)
+else: memory.add_documents([doc])
+memory.save_local(DB)
+
+INPUT FORMAT:
+Enter food preferences, allergies, budget, diet, and meal requirements. Example: 'Vegetarian, no peanuts, low budget, one-day meals'.
+
+OUTPUT FORMAT:
+A one-day meal plan with breakfast, lunch, dinner, snacks, and substitutions.
+
+***
+Question 12: Create a simple agent using LangGraph that uses Chain-of-Thought reasoning to break a software-development task into smaller steps. Use FAISS memory to store the user's preferred programming tools.
+
+SOURCE CODE:
+Filename: question_12.py
+import os
+from typing import TypedDict
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_core.documents import Document
+from langgraph.graph import StateGraph, START, END
+
+DB="q12_faiss"; emb=OpenAIEmbeddings()
+try: memory=FAISS.load_local(DB,emb,allow_dangerous_deserialization=True)
+except Exception: memory=None
+llm=ChatOpenAI(model=os.getenv("OPENAI_MODEL","gpt-4o-mini"),temperature=0)
+class S(TypedDict): request:str; result:str
+def breakdown(s):
+    past=memory.similarity_search(s["request"],k=3) if memory else []
+    prompt=f"Break the software task into ordered implementation steps, each with deliverables, dependencies, and validation tests. Give concise rationale rather than hidden chain-of-thought. Preferred tools from memory: {[d.page_content for d in past]}. Task: {s['request']}"
+    return {"result":llm.invoke(prompt).content}
+g=StateGraph(S); g.add_node("breakdown",breakdown); g.add_edge(START,"breakdown"); g.add_edge("breakdown",END)
+req=input("Describe the software to build and preferred language/tools: ")
+out=g.compile().invoke({"request":req,"result":""})["result"]; print(out)
+doc=Document(page_content=f"Task and tool preferences: {req}\nSteps: {out}")
+if memory is None: memory=FAISS.from_documents([doc],emb)
+else: memory.add_documents([doc])
+memory.save_local(DB)
+
+INPUT FORMAT:
+Describe software to build and preferred language/tools. Example: 'Student attendance web app; Python, Flask, SQLite'.
+
+OUTPUT FORMAT:
+Ordered development steps with deliverables, dependencies, and validation tests.
+
+***
+Question 13: Build a Python agent using LangChain that uses the ReAct method to answer questions about a student's previous academic activities. Store the student's information in ChromaDB and retrieve it when required.
+
+SOURCE CODE:
+Filename: question_13.py
+import os
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_chroma import Chroma
+from langchain_core.documents import Document
+from langchain_core.tools import tool
+from langchain.agents import create_agent
+
+emb=OpenAIEmbeddings(); memory=Chroma(collection_name="academic_activities",embedding_function=emb,persist_directory="./q13_chroma")
+llm=ChatOpenAI(model=os.getenv("OPENAI_MODEL","gpt-4o-mini"),temperature=0)
+@tool
+def search_academic_records(question: str) -> str:
+    """Search stored student academic activity records relevant to a question."""
+    docs=memory.similarity_search(question,k=5)
+    return "\n".join(d.page_content for d in docs) if docs else "No matching records stored."
+agent=create_agent(llm,tools=[search_academic_records],system_prompt="Use search_academic_records before answering questions about past activities. Do not invent missing facts.")
+mode=input("Enter 'add' to store an activity or 'ask' to query: ").strip().lower()
+if mode=="add":
+    activity=input("Academic activity to store: ")
+    memory.add_documents([Document(page_content=activity)])
+    print("Activity stored.")
+elif mode=="ask":
+    q=input("Question about previous academic activities: ")
+    result=agent.invoke({"messages":[{"role":"user","content":q}]})
+    print(result["messages"][-1].content)
+else: raise SystemExit("Choose add or ask.")
+
+INPUT FORMAT:
+Choose 'add' to store an activity or 'ask' to query records. Example: add, then 'Completed Python lab on lists on 2026-10-20'.
+
+OUTPUT FORMAT:
+For add: 'Activity stored.' For ask: an answer based on matching records or a message that no matching records were found.
+
+***
+Question 14: Create a Python agent using LangChain that uses the Tree-of-Thought method to generate different solutions for reducing the time required to complete a set of college assignments. Use ChromaDB to remember previous assignment information.
+
+SOURCE CODE:
+Filename: question_14.py
+import os
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_chroma import Chroma
+from langchain_core.documents import Document
+
+emb=OpenAIEmbeddings(); memory=Chroma(collection_name="assignment_history",embedding_function=emb,persist_directory="./q14_chroma")
+llm=ChatOpenAI(model=os.getenv("OPENAI_MODEL","gpt-4o-mini"),temperature=0)
+req=input("List assignments, deadlines, estimated effort, and constraints: ")
+past=memory.similarity_search(req,k=3)
+prompt=f"Tree-of-Thought: propose at least three distinct strategies to reduce completion time without sacrificing quality, compare risks and feasibility, then recommend a strategy. Do not reveal hidden chain-of-thought. Previous assignments: {[d.page_content for d in past]}. Current assignments: {req}"
+out=llm.invoke(prompt).content; print(out)
+memory.add_documents([Document(page_content=f"Assignments: {req}\nStrategies: {out}")])
+
+INPUT FORMAT:
+List assignments, deadlines, estimated effort, and constraints. Example: 'AI report 4h due Friday; Java lab 2h due Thursday'.
+
+OUTPUT FORMAT:
+Multiple time-saving strategies compared by feasibility and risks, followed by a recommendation.
+
+***
+Question 15: Build a simple agent using LangGraph that uses ReAct reasoning to prepare a daily task list from a user's requirements. Use FAISS memory to store completed tasks and retrieve them later.
+
+SOURCE CODE:
+Filename: question_15.py
+import os
+from typing import TypedDict
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_core.documents import Document
+from langgraph.graph import StateGraph, START, END
+
+DB="q15_faiss"; emb=OpenAIEmbeddings()
+try: memory=FAISS.load_local(DB,emb,allow_dangerous_deserialization=True)
+except Exception: memory=None
+llm=ChatOpenAI(model=os.getenv("OPENAI_MODEL","gpt-4o-mini"),temperature=0)
+class S(TypedDict): request:str; result:str
+def agent(s):
+    past=memory.similarity_search(s["request"],k=4) if memory else []
+    prompt=f"Use a ReAct-style workflow: identify tasks and constraints, prioritize by deadline/importance, estimate duration, and produce a realistic daily checklist. Do not reveal hidden chain-of-thought. Relevant completed tasks/history: {[d.page_content for d in past]}. Requirements: {s['request']}"
+    return {"result":llm.invoke(prompt).content}
+g=StateGraph(S); g.add_node("agent",agent); g.add_edge(START,"agent"); g.add_edge("agent",END)
+mode=input("Enter 'plan' or 'complete': ").strip().lower()
+if mode=="complete":
+    done=input("Completed task to store: ")
+    doc=Document(page_content="Completed task: "+done)
+    if memory is None: memory=FAISS.from_documents([doc],emb)
+    else: memory.add_documents([doc])
+    memory.save_local(DB); print("Completed task stored.")
+elif mode=="plan":
+    req=input("Tasks, deadlines, and available hours: ")
+    out=g.compile().invoke({"request":req,"result":""})["result"]; print(out)
+    doc=Document(page_content=f"Daily requirements: {req}\nTask list: {out}")
+    if memory is None: memory=FAISS.from_documents([doc],emb)
+    else: memory.add_documents([doc])
+    memory.save_local(DB)
+else: raise SystemExit("Choose plan or complete.")
+
+INPUT FORMAT:
+Choose 'plan' or 'complete'. Example: plan, then 'Finish DBMS notes by 6 PM; revise Java for 1 hour; available 4 hours'.
+
+OUTPUT FORMAT:
+A prioritized daily checklist, or 'Completed task stored.' when recording a completed task.
+
+***
+Question 16: Develop a multi-agent system using LangGraph with Planner, Researcher, and Checker agents to prepare a simple comparison of two programming languages. Use ChromaDB to store previous comparison results.
+
+SOURCE CODE:
+Filename: question_16.py
+import os
+from typing import TypedDict
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_chroma import Chroma
+from langchain_core.documents import Document
+from langgraph.graph import StateGraph, START, END
+
+emb=OpenAIEmbeddings(); memory=Chroma(collection_name="language_comparisons",embedding_function=emb,persist_directory="./q16_chroma")
+llm=ChatOpenAI(model=os.getenv("OPENAI_MODEL","gpt-4o-mini"),temperature=0)
+class S(TypedDict): request:str; outline:str; evidence:str; final:str
+def planner(s): return {"outline":llm.invoke("Planner: define fair comparison criteria for the two languages in this request: "+s["request"]).content}
+def researcher(s): return {"evidence":llm.invoke("Researcher: compare syntax, use cases, ecosystem, performance considerations, learning curve, and limitations. Criteria: "+s["outline"]).content}
+def checker(s): return {"final":llm.invoke("Checker: ensure balanced, clear, qualified comparison and finish with use-case-based guidance. Request: "+s["request"]+"\nCriteria: "+s["outline"]+"\nResearch: "+s["evidence"]).content}
+g=StateGraph(S); g.add_node("planner",planner); g.add_node("researcher",researcher); g.add_node("checker",checker)
+g.add_edge(START,"planner"); g.add_edge("planner","researcher"); g.add_edge("researcher","checker"); g.add_edge("checker",END)
+req=input("Enter two programming languages and intended use: ")
+past=memory.similarity_search(req,k=3)
+req += "\nRelevant previous comparisons: "+str([d.page_content for d in past])
+out=g.compile().invoke({"request":req,"outline":"","evidence":"","final":""})["final"]; print(out)
+memory.add_documents([Document(page_content=f"Comparison request: {req}\nResult: {out}")])
+
+INPUT FORMAT:
+Enter two languages and intended use. Example: 'Python and Java for backend development'.
+
+OUTPUT FORMAT:
+A balanced comparison of syntax, use cases, ecosystem, performance considerations, and learning curve.
+
+***
+Question 17: Create a Python agent using LangChain that uses a step-by-step reasoning approach to prepare a revision plan for an upcoming examination. Use FAISS memory to remember the student's weak and strong subjects.
+
+SOURCE CODE:
+Filename: question_17.py
+import os
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_core.documents import Document
+
+DB="q17_faiss"; emb=OpenAIEmbeddings()
+try: memory=FAISS.load_local(DB,emb,allow_dangerous_deserialization=True)
+except Exception: memory=None
+llm=ChatOpenAI(model=os.getenv("OPENAI_MODEL","gpt-4o-mini"),temperature=0)
+req=input("Exam date, subjects, syllabus, available hours, weak/strong subjects: ")
+past=memory.similarity_search(req,k=4) if memory else []
+prompt=f"Create a step-by-step revision timetable prioritizing weak subjects, maintaining strong subjects, adding breaks and practice tests. Provide concise rationale, not hidden chain-of-thought. Previous strengths/weaknesses: {[d.page_content for d in past]}. Current details: {req}"
+out=llm.invoke(prompt).content; print(out)
+doc=Document(page_content=f"Exam profile: {req}\nRevision plan: {out}")
+if memory is None: memory=FAISS.from_documents([doc],emb)
+else: memory.add_documents([doc])
+memory.save_local(DB)
+
+INPUT FORMAT:
+Enter exam date, subjects, syllabus, available hours, and weak/strong subjects. Example: 'Exam in 12 days; weak in statistics; strong in Python; 2 hours/day'.
+
+OUTPUT FORMAT:
+A revision timetable prioritizing weaker topics and including breaks and practice tests.
+
+***
+Question 18: Build a simple agent using LangGraph that uses the Tree-of-Thought method to generate three possible solutions for organizing files in a college project. Use ChromaDB to store previously used project categories.
+
+SOURCE CODE:
+Filename: question_18.py
+import os
+from typing import TypedDict
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_chroma import Chroma
+from langchain_core.documents import Document
+from langgraph.graph import StateGraph, START, END
+
+emb=OpenAIEmbeddings(); memory=Chroma(collection_name="project_categories",embedding_function=emb,persist_directory="./q18_chroma")
+llm=ChatOpenAI(model=os.getenv("OPENAI_MODEL","gpt-4o-mini"),temperature=0)
+class S(TypedDict): request:str; result:str
+def organize(s):
+    past=memory.similarity_search(s["request"],k=3)
+    prompt=f"Tree-of-Thought: generate exactly three distinct folder structures for a college project, compare clarity, maintainability, and collaboration suitability, then recommend one. Provide concise comparison, not hidden chain-of-thought. Previously used categories: {[d.page_content for d in past]}. Project details: {s['request']}"
+    return {"result":llm.invoke(prompt).content}
+g=StateGraph(S); g.add_node("organizer",organize); g.add_edge(START,"organizer"); g.add_edge("organizer",END)
+req=input("Project type, languages, file types, and team workflow: ")
+out=g.compile().invoke({"request":req,"result":""})["result"]; print(out)
+memory.add_documents([Document(page_content=f"Project categories: {req}\nFolder options: {out}")])
+
+INPUT FORMAT:
+Enter project type, languages, file types, and team workflow. Example: 'Python ML project with notebooks, datasets, reports, 3 team members'.
+
+OUTPUT FORMAT:
+Three folder-organization options, a concise comparison, and a recommended structure.
+
+***
+Question 19: Create a Python agent using LangChain that uses the ReAct method to plan a simple budget for a college student's monthly expenses. Use ChromaDB to remember previous expense categories.
+
+SOURCE CODE:
+Filename: question_19.py
+import os
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_chroma import Chroma
+from langchain_core.documents import Document
+from langchain_core.tools import tool
+from langchain.agents import create_agent
+
+emb=OpenAIEmbeddings(); memory=Chroma(collection_name="expense_categories",embedding_function=emb,persist_directory="./q19_chroma")
+llm=ChatOpenAI(model=os.getenv("OPENAI_MODEL","gpt-4o-mini"),temperature=0)
+@tool
+def calculate_budget(income_and_expenses: str) -> str:
+    """Calculate remaining budget from JSON with income and expenses numeric values."""
+    import json
+    data=json.loads(income_and_expenses)
+    income=float(data["income"])
+    expenses={k:float(v) for k,v in data["expenses"].items()}
+    return json.dumps({"income":income,"expenses":expenses,"total_expenses":round(sum(expenses.values()),2),"remaining":round(income-sum(expenses.values()),2)})
+agent=create_agent(llm,tools=[calculate_budget],system_prompt="Use the budget calculation tool when numeric income and expense data are provided. Make a realistic budget and do not invent prices.")
+req=input("Monthly income and expenses (include amounts), or describe budget needs: ")
+past=memory.similarity_search(req,k=3)
+prompt=f"Use a ReAct-style approach to create a practical student monthly budget, separate needs and wants, and identify savings opportunities. Previous expense categories: {[d.page_content for d in past]}. Request: {req}"
+result=agent.invoke({"messages":[{"role":"user","content":prompt}]})
+out=result["messages"][-1].content; print(out)
+memory.add_documents([Document(page_content=f"Expense categories/request: {req}\nBudget: {out}")])
+
+INPUT FORMAT:
+Enter monthly income and expenses or describe budget needs. Example: 'Income 8000; hostel 3000; food 2000; travel 800; books 500'.
+
+OUTPUT FORMAT:
+A student budget with categories, total expenses, remaining amount when numeric data is provided, and suggestions.
+
+***
+Question 20: Build a simple multi-agent system using LangGraph with Planner, Researcher, and Checker agents to solve a given real-world task. The Planner should divide the task, the Researcher should provide relevant information, and the Checker should verify the final response. Use FAISS or ChromaDB to store information for future tasks.
+
+SOURCE CODE:
+Filename: question_20.py
+import os
+from typing import TypedDict
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_chroma import Chroma
+from langchain_core.documents import Document
+from langgraph.graph import StateGraph, START, END
+
+emb=OpenAIEmbeddings(); memory=Chroma(collection_name="real_world_tasks",embedding_function=emb,persist_directory="./q20_chroma")
+llm=ChatOpenAI(model=os.getenv("OPENAI_MODEL","gpt-4o-mini"),temperature=0)
+class S(TypedDict): task:str; steps:str; information:str; final:str
+def planner(s): return {"steps":llm.invoke("Planner: divide the real-world task into clear, ordered subtasks and identify constraints. Task: "+s["task"]).content}
+def researcher(s): return {"information":llm.invoke("Researcher: provide relevant general information, practical options, assumptions, and uncertainties for these subtasks: "+s["steps"]).content}
+def checker(s): return {"final":llm.invoke("Checker: verify relevance, consistency, feasibility, and uncertainty. Produce a concise final answer and state assumptions. Task: "+s["task"]+"\nPlan: "+s["steps"]+"\nInformation: "+s["information"]).content}
+g=StateGraph(S); g.add_node("planner",planner); g.add_node("researcher",researcher); g.add_node("checker",checker)
+g.add_edge(START,"planner"); g.add_edge("planner","researcher"); g.add_edge("researcher","checker"); g.add_edge("checker",END)
+task=input("Describe the real-world task, goal, constraints, and context: ")
+past=memory.similarity_search(task,k=3)
+task += "\nRelevant previous task records: "+str([d.page_content for d in past])
+out=g.compile().invoke({"task":task,"steps":"","information":"","final":""})["final"]; print(out)
+memory.add_documents([Document(page_content=f"Task: {task}\nVerified response: {out}")])
+
+INPUT FORMAT:
+Describe the real-world task, goal, constraints, and context. Example: 'Plan a low-cost college club workshop for 40 students in two weeks'.
+
+OUTPUT FORMAT:
+A concise response prepared through Planner, Researcher, and Checker stages and stored for future retrieval.
+
+***
